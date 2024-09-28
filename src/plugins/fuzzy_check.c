@@ -49,6 +49,9 @@
 #include "libutil/libev_helper.h"
 
 #define DEFAULT_SYMBOL "R_FUZZY_HASH"
+#define RSPAMD_FUZZY_SYMBOL_FORBIDDEN "FUZZY_FORBIDDEN"
+#define RSPAMD_FUZZY_SYMBOL_RATELIMITED "FUZZY_RATELIMITED"
+#define RSPAMD_FUZZY_SYMBOL_ENCRYPTION_REQUIRED "FUZZY_ENCRYPTION_REQUIRED"
 
 #define DEFAULT_IO_TIMEOUT 1.0
 #define DEFAULT_RETRANSMITS 3
@@ -68,6 +71,12 @@ struct fuzzy_mapping {
 	double weight;
 };
 
+enum fuzzy_rule_mode {
+	fuzzy_rule_read_only,
+	fuzzy_rule_write_only,
+	fuzzy_rule_read_write
+};
+
 struct fuzzy_rule {
 	struct upstream_list *servers;
 	const char *symbol;
@@ -84,7 +93,7 @@ struct fuzzy_rule {
 	struct rspamd_cryptobox_pubkey *peer_key;
 	double max_score;
 	double weight_threshold;
-	gboolean read_only;
+	enum fuzzy_rule_mode mode;
 	gboolean skip_unknown;
 	gboolean no_share;
 	gboolean no_subject;
@@ -328,7 +337,7 @@ fuzzy_rule_new(const char *default_symbol, rspamd_mempool_t *pool)
 	rspamd_mempool_add_destructor(pool,
 								  (rspamd_mempool_destruct_t) g_hash_table_unref,
 								  rule->mappings);
-	rule->read_only = FALSE;
+	rule->mode = fuzzy_rule_read_write;
 	rule->weight_threshold = NAN;
 
 	return rule;
@@ -458,7 +467,26 @@ fuzzy_parse_rule(struct rspamd_config *cfg, const ucl_object_t *obj,
 
 
 	if ((value = ucl_object_lookup(obj, "read_only")) != NULL) {
-		rule->read_only = ucl_obj_toboolean(value);
+		rule->mode = ucl_obj_toboolean(value) ? fuzzy_rule_read_only : fuzzy_rule_read_write;
+	}
+
+	if ((value = ucl_object_lookup(obj, "mode")) != NULL) {
+		const char *mode_str = ucl_object_tostring(value);
+
+		if (g_ascii_strcasecmp(mode_str, "read_only") == 0) {
+			rule->mode = fuzzy_rule_read_only;
+		}
+		else if (g_ascii_strcasecmp(mode_str, "write_only") == 0) {
+			rule->mode = fuzzy_rule_write_only;
+		}
+		else if (g_ascii_strcasecmp(mode_str, "read_write") == 0) {
+			rule->mode = fuzzy_rule_read_write;
+		}
+		else {
+			msg_warn_config("unknown mode: %s, use read_write by default",
+							mode_str);
+			rule->mode = fuzzy_rule_read_write;
+		}
 	}
 
 	if ((value = ucl_object_lookup(obj, "skip_unknown")) != NULL) {
@@ -543,15 +571,13 @@ fuzzy_parse_rule(struct rspamd_config *cfg, const ucl_object_t *obj,
 		k = ucl_object_tostring(value);
 
 		if (k == NULL || (rule->peer_key =
-							  rspamd_pubkey_from_base32(k, 0, RSPAMD_KEYPAIR_KEX,
-														RSPAMD_CRYPTOBOX_MODE_25519)) == NULL) {
+							  rspamd_pubkey_from_base32(k, 0, RSPAMD_KEYPAIR_KEX)) == NULL) {
 			msg_err_config("bad encryption key value: %s",
 						   k);
 			return -1;
 		}
 
-		rule->local_key = rspamd_keypair_new(RSPAMD_KEYPAIR_KEX,
-											 RSPAMD_CRYPTOBOX_MODE_25519);
+		rule->local_key = rspamd_keypair_new(RSPAMD_KEYPAIR_KEX);
 	}
 
 	if ((value = ucl_object_lookup(obj, "learn_condition")) != NULL) {
@@ -1155,6 +1181,44 @@ int fuzzy_check_module_config(struct rspamd_config *cfg, bool validate)
 								 1,
 								 1);
 
+		/* Register meta symbols (blocked, ratelimited, etc) */
+		rspamd_symcache_add_symbol(cfg->cache,
+								   RSPAMD_FUZZY_SYMBOL_FORBIDDEN, 0, NULL, NULL,
+								   SYMBOL_TYPE_VIRTUAL,
+								   cb_id);
+		rspamd_config_add_symbol(cfg,
+								 RSPAMD_FUZZY_SYMBOL_FORBIDDEN,
+								 0.0,
+								 "Fuzzy access denied",
+								 "fuzzy",
+								 0,
+								 1,
+								 1);
+		rspamd_symcache_add_symbol(cfg->cache,
+								   RSPAMD_FUZZY_SYMBOL_RATELIMITED, 0, NULL, NULL,
+								   SYMBOL_TYPE_VIRTUAL,
+								   cb_id);
+		rspamd_config_add_symbol(cfg,
+								 RSPAMD_FUZZY_SYMBOL_RATELIMITED,
+								 0.0,
+								 "Fuzzy rate limit is reached",
+								 "fuzzy",
+								 0,
+								 1,
+								 1);
+		rspamd_symcache_add_symbol(cfg->cache,
+								   RSPAMD_FUZZY_SYMBOL_ENCRYPTION_REQUIRED, 0, NULL, NULL,
+								   SYMBOL_TYPE_VIRTUAL,
+								   cb_id);
+		rspamd_config_add_symbol(cfg,
+								 RSPAMD_FUZZY_SYMBOL_ENCRYPTION_REQUIRED,
+								 0.0,
+								 "Fuzzy encryption is required by a server",
+								 "fuzzy",
+								 0,
+								 1,
+								 1);
+
 		/*
 		 * Here we can have 2 possibilities:
 		 *
@@ -1334,8 +1398,7 @@ fuzzy_encrypt_cmd(struct fuzzy_rule *rule,
 								 rule->local_key, rule->peer_key);
 	rspamd_cryptobox_encrypt_nm_inplace(data, datalen,
 										hdr->nonce, rspamd_pubkey_get_nm(rule->peer_key, rule->local_key),
-										hdr->mac,
-										rspamd_pubkey_alg(rule->peer_key));
+										hdr->mac);
 }
 
 static struct fuzzy_cmd_io *
@@ -2209,8 +2272,7 @@ fuzzy_process_reply(unsigned char **pos, int *r, GPtrArray *req,
 												 sizeof(encrep.rep),
 												 encrep.hdr.nonce,
 												 rspamd_pubkey_get_nm(rule->peer_key, rule->local_key),
-												 encrep.hdr.mac,
-												 rspamd_pubkey_alg(rule->peer_key))) {
+												 encrep.hdr.mac)) {
 			msg_info("cannot decrypt reply");
 			return NULL;
 		}
@@ -2299,6 +2361,8 @@ fuzzy_insert_result(struct fuzzy_client_session *session,
 	 * Otherwise `value` means error code
 	 */
 
+	msg_debug_fuzzy_check("got reply with probability %.2f and value %.2f",
+						  (double) rep->v1.prob, (double) rep->v1.value);
 	nval = fuzzy_normalize(rep->v1.value, weight);
 
 	if (io) {
@@ -2488,7 +2552,16 @@ fuzzy_check_try_read(struct fuzzy_client_session *session)
 				}
 			}
 			else if (rep->v1.value == 403) {
-				rspamd_task_insert_result(task, "FUZZY_BLOCKED", 0.0,
+				/* In fact, it should be 429, but we preserve compatibility */
+				rspamd_task_insert_result(task, RSPAMD_FUZZY_SYMBOL_RATELIMITED, 1.0,
+										  session->rule->name);
+			}
+			else if (rep->v1.value == 503) {
+				rspamd_task_insert_result(task, RSPAMD_FUZZY_SYMBOL_FORBIDDEN, 1.0,
+										  session->rule->name);
+			}
+			else if (rep->v1.value == 415) {
+				rspamd_task_insert_result(task, RSPAMD_FUZZY_SYMBOL_ENCRYPTION_REQUIRED, 1.0,
 										  session->rule->name);
 			}
 			else if (rep->v1.value == 401) {
@@ -3402,11 +3475,14 @@ fuzzy_symbol_callback(struct rspamd_task *task,
 
 	PTR_ARRAY_FOREACH(fuzzy_module_ctx->fuzzy_rules, i, rule)
 	{
-		commands = fuzzy_generate_commands(task, rule, FUZZY_CHECK, 0, 0, 0);
+		if (rule->mode != fuzzy_rule_write_only) {
+			commands = fuzzy_generate_commands(task, rule, FUZZY_CHECK, 0, 0, 0);
 
-		if (commands != NULL) {
-			register_fuzzy_client_call(task, rule, commands);
+			if (commands != NULL) {
+				register_fuzzy_client_call(task, rule, commands);
+			}
 		}
+		/* Skip write only rules from checks */
 	}
 
 	rspamd_symcache_item_async_dec_check(task, item, M);
@@ -3493,9 +3569,9 @@ register_fuzzy_controller_call(struct rspamd_http_connection_entry *entry,
 }
 
 static void
-fuzzy_process_handler(struct rspamd_http_connection_entry *conn_ent,
-					  struct rspamd_http_message *msg, int cmd, int value, int flag,
-					  struct fuzzy_ctx *ctx, gboolean is_hash, unsigned int flags)
+fuzzy_modify_handler(struct rspamd_http_connection_entry *conn_ent,
+					 struct rspamd_http_message *msg, int cmd, int value, int flag,
+					 struct fuzzy_ctx *ctx, gboolean is_hash, unsigned int flags)
 {
 	struct fuzzy_rule *rule;
 	struct rspamd_controller_session *session = conn_ent->ud;
@@ -3543,7 +3619,7 @@ fuzzy_process_handler(struct rspamd_http_connection_entry *conn_ent,
 
 	PTR_ARRAY_FOREACH(fuzzy_module_ctx->fuzzy_rules, i, rule)
 	{
-		if (rule->read_only) {
+		if (rule->mode == fuzzy_rule_read_only) {
 			continue;
 		}
 
@@ -3798,8 +3874,8 @@ fuzzy_controller_handler(struct rspamd_http_connection_entry *conn_ent,
 		send_flags |= FUZZY_CHECK_FLAG_NOTEXT;
 	}
 
-	fuzzy_process_handler(conn_ent, msg, cmd, value, flag,
-						  (struct fuzzy_ctx *) ctx, is_hash, send_flags);
+	fuzzy_modify_handler(conn_ent, msg, cmd, value, flag,
+						 (struct fuzzy_ctx *) ctx, is_hash, send_flags);
 
 	return 0;
 }
@@ -3881,7 +3957,7 @@ fuzzy_check_lua_process_learn(struct rspamd_task *task,
 		if (!res) {
 			break;
 		}
-		if (rule->read_only) {
+		if (rule->mode == fuzzy_rule_read_only) {
 			continue;
 		}
 
@@ -4183,7 +4259,7 @@ fuzzy_lua_gen_hashes_handler(lua_State *L)
 
 	PTR_ARRAY_FOREACH(fuzzy_module_ctx->fuzzy_rules, i, rule)
 	{
-		if (rule->read_only) {
+		if (rule->mode == fuzzy_rule_read_only) {
 			continue;
 		}
 
@@ -4411,7 +4487,7 @@ fuzzy_lua_list_storages(lua_State *L)
 	{
 		lua_newtable(L);
 
-		lua_pushboolean(L, rule->read_only);
+		lua_pushboolean(L, rule->mode == fuzzy_rule_read_only);
 		lua_setfield(L, -2, "read_only");
 
 		/* Push servers */

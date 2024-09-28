@@ -160,6 +160,7 @@ struct rspamd_proxy_ctx {
 	/* Language detector */
 	struct rspamd_lang_detector *lang_det;
 	double task_timeout;
+	struct rspamd_main *srv;
 };
 
 enum rspamd_backend_flags {
@@ -394,7 +395,7 @@ rspamd_proxy_parse_upstream(rspamd_mempool_t *pool,
 	elt = ucl_object_lookup(obj, "key");
 	if (elt != NULL) {
 		up->key = rspamd_pubkey_from_base32(ucl_object_tostring(elt), 0,
-											RSPAMD_KEYPAIR_KEX, RSPAMD_CRYPTOBOX_MODE_25519);
+											RSPAMD_KEYPAIR_KEX);
 
 		if (up->key == NULL) {
 			g_set_error(err, rspamd_proxy_quark(), 100,
@@ -570,7 +571,7 @@ rspamd_proxy_parse_mirror(rspamd_mempool_t *pool,
 	elt = ucl_object_lookup(obj, "key");
 	if (elt != NULL) {
 		up->key = rspamd_pubkey_from_base32(ucl_object_tostring(elt), 0,
-											RSPAMD_KEYPAIR_KEX, RSPAMD_CRYPTOBOX_MODE_25519);
+											RSPAMD_KEYPAIR_KEX);
 
 		if (up->key == NULL) {
 			g_set_error(err, rspamd_proxy_quark(), 100,
@@ -1397,7 +1398,8 @@ proxy_backend_mirror_finish_handler(struct rspamd_http_connection *conn,
 		bk_conn->err = "cannot parse ucl";
 	}
 
-	msg_info_session("finished mirror connection to %s", bk_conn->name);
+	msg_info_session("finished mirror connection to %s; HTTP code: %d",
+					 bk_conn->name, msg->code);
 	rspamd_upstream_ok(bk_conn->up);
 
 	proxy_backend_close_connection(bk_conn);
@@ -1734,6 +1736,8 @@ rspamd_proxy_scan_self_reply(struct rspamd_task *task)
 	int out_type = UCL_EMIT_JSON_COMPACT;
 	const char *ctype = "application/json";
 	const rspamd_ftok_t *accept_hdr = rspamd_task_get_request_header(task, "Accept");
+	rspamd_fstring_t *output;
+	struct rspamd_stat stat_copy;
 
 	if (accept_hdr && rspamd_substring_search(accept_hdr->begin, accept_hdr->len,
 											  "application/msgpack", sizeof("application/msgpack") - 1) != -1) {
@@ -1758,6 +1762,13 @@ rspamd_proxy_scan_self_reply(struct rspamd_task *task)
 	case CMD_PING:
 		rspamd_http_message_set_body(msg, "pong" CRLF, 6);
 		ctype = "text/plain";
+		break;
+	case CMD_METRICS:
+		memcpy(&stat_copy, session->ctx->srv->stat, sizeof(stat_copy));
+		output = rspamd_metrics_to_prometheus_string(
+			rspamd_worker_metrics_object(task->cfg, &stat_copy, ev_time() - session->ctx->srv->start_time));
+		rspamd_http_message_set_body_from_fstring_steal(msg, output);
+		ctype = "application/openmetrics-text; version=1.0.0; charset=utf-8";
 		break;
 	default:
 		msg_err_task("BROKEN");
@@ -1903,7 +1914,7 @@ rspamd_proxy_self_scan(struct rspamd_proxy_session *session)
 		task->flags |= RSPAMD_TASK_FLAG_SKIP;
 	}
 	else {
-		if (task->cmd == CMD_PING) {
+		if (task->cmd == CMD_PING || task->cmd == CMD_METRICS) {
 			task->flags |= RSPAMD_TASK_FLAG_SKIP;
 		}
 		else {
@@ -2193,6 +2204,8 @@ proxy_client_finish_handler(struct rspamd_http_connection *conn,
 		rspamd_http_message_remove_header(msg, "Keep-Alive");
 		rspamd_http_message_remove_header(msg, "Connection");
 		rspamd_http_message_remove_header(msg, "Key");
+		rspamd_http_message_add_header_len(msg, LOG_TAG_HEADER, session->pool->tag.uid,
+										   sizeof(session->pool->tag.uid));
 
 		proxy_open_mirror_connections(session);
 		rspamd_http_connection_reset(session->client_conn);
@@ -2200,7 +2213,10 @@ proxy_client_finish_handler(struct rspamd_http_connection *conn,
 		proxy_send_master_message(session);
 	}
 	else {
-		msg_info_session("finished master connection");
+		msg_info_session("finished master connection to %s; HTTP code: %d",
+						 rspamd_inet_address_to_string_pretty(
+							 rspamd_upstream_addr_cur(session->master_conn->up)),
+						 msg->code);
 		proxy_backend_close_connection(session->master_conn);
 		REF_RELEASE(session);
 	}
@@ -2412,6 +2428,7 @@ start_rspamd_proxy(struct rspamd_worker *worker)
 
 	g_assert(rspamd_worker_check_context(worker->ctx, rspamd_rspamd_proxy_magic));
 	ctx->cfg = worker->srv->cfg;
+	ctx->srv = worker->srv;
 	ctx->event_loop = rspamd_prepare_worker(worker, "rspamd_proxy",
 											proxy_accept_socket);
 

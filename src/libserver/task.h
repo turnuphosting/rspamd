@@ -1,11 +1,11 @@
-/*-
- * Copyright 2016 Vsevolod Stakhov
+/*
+ * Copyright 2024 Vsevolod Stakhov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +36,7 @@ enum rspamd_command {
 	CMD_CHECK_RSPAMC, /* Legacy rspamc format (like SA one) */
 	CMD_CHECK,        /* Legacy check - metric json reply */
 	CMD_CHECK_V2,     /* Modern check - symbols in json reply  */
+	CMD_METRICS,
 };
 
 enum rspamd_task_stage {
@@ -114,9 +115,6 @@ enum rspamd_task_stage {
 #define RSPAMD_TASK_FLAG_MESSAGE_REWRITE (1u << 24u)
 #define RSPAMD_TASK_FLAG_MAX_SHIFT (24u)
 
-
-/* Request has a JSON control block */
-#define RSPAMD_TASK_PROTOCOL_FLAG_HAS_CONTROL (1u << 0u)
 /* Request has been done by a local client */
 #define RSPAMD_TASK_PROTOCOL_FLAG_LOCAL_CLIENT (1u << 1u)
 /* Request has been sent via milter */

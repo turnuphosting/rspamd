@@ -1318,6 +1318,7 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF(task, get_metric_threshold),
 	LUA_INTERFACE_DEF(task, set_metric_score),
 	LUA_INTERFACE_DEF(task, set_metric_subject),
+	{"set_subject", lua_task_set_metric_subject},
 	LUA_INTERFACE_DEF(task, learn),
 	LUA_INTERFACE_DEF(task, set_settings),
 	LUA_INTERFACE_DEF(task, get_settings),
@@ -2634,6 +2635,53 @@ lua_task_has_urls(lua_State *L)
 	return 2;
 }
 
+struct rspamd_url_query_to_inject_cbd {
+	struct rspamd_task *task;
+	struct rspamd_url *url;
+	GPtrArray *mpart_urls;
+};
+
+static gboolean
+inject_url_query_callback(struct rspamd_url *url, gsize start_offset,
+						  gsize end_offset, gpointer ud)
+{
+	struct rspamd_url_query_to_inject_cbd *cbd =
+		(struct rspamd_url_query_to_inject_cbd *) ud;
+	struct rspamd_task *task;
+
+	task = cbd->task;
+
+	url->flags |= RSPAMD_URL_FLAG_QUERY;
+
+	if (rspamd_url_set_add_or_increase(MESSAGE_FIELD(task, urls), url, false) && cbd->mpart_urls) {
+		g_ptr_array_add(cbd->mpart_urls, url);
+	}
+
+	return TRUE;
+}
+
+static void
+inject_url_query(struct rspamd_task *task, struct rspamd_url *url,
+				 GPtrArray *part_urls)
+{
+	if (url->querylen > 0) {
+		struct rspamd_url_query_to_inject_cbd cbd;
+
+		cbd.task = task;
+		cbd.url = url;
+		cbd.mpart_urls = part_urls;
+
+		rspamd_url_find_multiple(task->task_pool,
+								 rspamd_url_query_unsafe(url), url->querylen,
+								 RSPAMD_URL_FIND_ALL, NULL,
+								 inject_url_query_callback, &cbd);
+	}
+
+	if (part_urls) {
+		g_ptr_array_add(part_urls, url);
+	}
+}
+
 static int
 lua_task_inject_url(lua_State *L)
 {
@@ -2644,15 +2692,13 @@ lua_task_inject_url(lua_State *L)
 
 	if (lua_isuserdata(L, 3)) {
 		/* We also have a mime part there */
-		mpart = *((struct rspamd_mime_part **) rspamd_lua_check_udata_maybe(L,
-																			3, rspamd_mimepart_classname));
+		mpart = *((struct rspamd_mime_part **)
+					  rspamd_lua_check_udata_maybe(L, 3, rspamd_mimepart_classname));
 	}
-
 	if (task && task->message && url && url->url) {
 		if (rspamd_url_set_add_or_increase(MESSAGE_FIELD(task, urls), url->url, false)) {
 			if (mpart && mpart->urls) {
-				/* Also add url to the mime part */
-				g_ptr_array_add(mpart->urls, url->url);
+				inject_url_query(task, url->url, mpart->urls);
 			}
 		}
 	}
@@ -4637,7 +4683,7 @@ lua_push_symbol_result(lua_State *L,
 	struct rspamd_symbol_option *opt;
 	struct rspamd_symbols_group *sym_group;
 	unsigned int i;
-	int j = 1, table_fields_cnt = 4;
+	int j = 1, table_fields_cnt = 5;
 
 	if (!metric_res) {
 		metric_res = task->result;
@@ -4665,8 +4711,20 @@ lua_push_symbol_result(lua_State *L,
 			lua_pushstring(L, symbol);
 			lua_settable(L, -3);
 		}
+
 		lua_pushstring(L, "score");
 		lua_pushnumber(L, s->score);
+		lua_settable(L, -3);
+
+		/* Dynamic weight of the symbol */
+		if (s->sym != NULL && s->sym->score != 0) {
+			lua_pushstring(L, "weight");
+			lua_pushnumber(L, s->score / s->sym->score);
+		}
+		else {
+			lua_pushstring(L, "weight");
+			lua_pushnumber(L, 0.0);
+		}
 		lua_settable(L, -3);
 
 		if (s->sym && s->sym->gr) {

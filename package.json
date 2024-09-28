@@ -1,14 +1,9 @@
 {
     "devDependencies": {
-        "eslint": "*",
-        "@stylistic/eslint-plugin": "*",
-        "stylelint": ">=13.6.0",
-        "stylelint-config-standard": "*",
-        "postcss-html": "*"
-    },
-    "eslintIgnore": [
-        "*.min.js",
-        "index.html",
-        "prism.js"
-    ]
+        "@stylistic/eslint-plugin": "^2.8.0",
+        "eslint": "^9.10.0",
+        "postcss-html": "*",
+        "stylelint": ">=16.9.0",
+        "stylelint-config-standard": "*"
+    }
 }

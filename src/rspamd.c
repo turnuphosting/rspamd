@@ -979,12 +979,16 @@ load_rspamd_config(struct rspamd_main *rspamd_main,
 
 		if (init_modules) {
 			if (!rspamd_init_filters(cfg, reload, false)) {
+				msg_err_main("init filters failed");
+
 				return FALSE;
 			}
 		}
 
 		/* Do post-load actions */
 		if (!rspamd_config_post_load(cfg, opts)) {
+			msg_err_main("post load failed");
+
 			return FALSE;
 		}
 	}
@@ -1644,6 +1648,7 @@ int main(int argc, char **argv, char **env)
 		exit(EXIT_FAILURE);
 	}
 
+	rspamd_main->start_time = ev_time();
 	/* Unblock signals */
 	sigemptyset(&signals.sa_mask);
 	sigprocmask(SIG_SETMASK, &signals.sa_mask, NULL);

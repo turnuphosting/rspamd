@@ -25,6 +25,7 @@
 #include "unix-std.h"
 #include "protocol_internal.h"
 #include "libserver/mempool_vars_internal.h"
+#include "libserver/worker_util.h"
 #include "contrib/fastutf8/fastutf8.h"
 #include "task.h"
 #include "lua/lua_classnames.h"
@@ -205,6 +206,19 @@ rspamd_protocol_handle_url(struct rspamd_task *task,
 		else if (COMPARE_CMD(p, MSG_CMD_REPORT_IFSPAM, pathlen)) {
 			msg_debug_protocol("got reportifspam -> old check command");
 			task->cmd = CMD_CHECK;
+		}
+		else {
+			goto err;
+		}
+		break;
+	case 'M':
+	case 'm':
+		/* metrics, process */
+		if (COMPARE_CMD(p, MSG_CMD_METRICS, pathlen)) {
+			msg_debug_protocol("got metrics command");
+			task->cmd = CMD_METRICS;
+			task->flags |= RSPAMD_TASK_FLAG_SKIP;
+			task->processed_stages |= RSPAMD_TASK_STAGE_DONE; /* Skip all */
 		}
 		else {
 			goto err;
@@ -646,9 +660,9 @@ rspamd_protocol_handle_headers(struct rspamd_task *task,
 		IF_HEADER(USER_HEADER)
 		{
 			/*
-					 * We must ignore User header in case of spamc, as SA has
-					 * different meaning of this header
-					 */
+								 * We must ignore User header in case of spamc, as SA has
+								 * different meaning of this header
+								 */
 			msg_debug_protocol("read user header, value: %T", hv_tok);
 			if (!RSPAMD_TASK_IS_SPAMC(task)) {
 				task->auth_user = rspamd_mempool_ftokdup(task->task_pool,
@@ -694,15 +708,18 @@ rspamd_protocol_handle_headers(struct rspamd_task *task,
 				task->flags |= RSPAMD_TASK_FLAG_NO_LOG;
 			}
 		}
+		IF_HEADER(LOG_TAG_HEADER)
+		{
+			msg_debug_protocol("read log-tag header, value: %T", hv_tok);
+			/* Ensure that a tag is valid */
+			if (rspamd_fast_utf8_validate(hv_tok->begin, hv_tok->len) == 0) {
+				memcpy(task->task_pool->tag.uid, hv_tok->begin,
+					   MIN(hv_tok->len, sizeof(task->task_pool->tag.uid)));
+			}
+		}
 		break;
 	case 'm':
 	case 'M':
-		IF_HEADER(MLEN_HEADER)
-		{
-			msg_debug_protocol("read message length header, value: %T",
-							   hv_tok);
-			task->protocol_flags |= RSPAMD_TASK_PROTOCOL_FLAG_HAS_CONTROL;
-		}
 		IF_HEADER(MTA_TAG_HEADER)
 		{
 			char *mta_tag;
@@ -738,9 +755,9 @@ rspamd_protocol_handle_headers(struct rspamd_task *task,
 	default:
 		msg_debug_protocol("generic header: %T", hn_tok);
 		break;
-			}
+				}
 
-			rspamd_task_add_request_header (task, hn_tok, hv_tok);
+				rspamd_task_add_request_header (task, hn_tok, hv_tok);
 }
 }); /* End of kh_foreach_value */
 
@@ -757,120 +774,6 @@ if (!has_ip) {
 }
 
 return TRUE;
-}
-
-#define BOOL_TO_FLAG(val, flags, flag) \
-	do {                               \
-		if ((val)) (flags) |= (flag);  \
-		else                           \
-			(flags) &= ~(flag);        \
-	} while (0)
-
-gboolean
-rspamd_protocol_parse_task_flags(rspamd_mempool_t *pool,
-								 const ucl_object_t *obj,
-								 gpointer ud,
-								 struct rspamd_rcl_section *section,
-								 GError **err)
-{
-	struct rspamd_rcl_struct_parser *pd = ud;
-	int *target;
-	const char *key;
-	gboolean value;
-
-	target = (int *) (((char *) pd->user_struct) + pd->offset);
-	key = ucl_object_key(obj);
-	value = ucl_object_toboolean(obj);
-
-	if (key != NULL) {
-		if (g_ascii_strcasecmp(key, "pass_all") == 0) {
-			BOOL_TO_FLAG(value, *target, RSPAMD_TASK_FLAG_PASS_ALL);
-		}
-		else if (g_ascii_strcasecmp(key, "no_log") == 0) {
-			BOOL_TO_FLAG(value, *target, RSPAMD_TASK_FLAG_NO_LOG);
-		}
-	}
-
-	return TRUE;
-}
-
-static struct rspamd_rcl_sections_map *control_parser = NULL;
-
-RSPAMD_CONSTRUCTOR(rspamd_protocol_control_parser_ctor)
-{
-
-	struct rspamd_rcl_section *sub = rspamd_rcl_add_section(&control_parser, NULL,
-															"*",
-															NULL,
-															NULL,
-															UCL_OBJECT,
-															FALSE,
-															TRUE);
-	/* Default handlers */
-	rspamd_rcl_add_default_handler(sub,
-								   "ip",
-								   rspamd_rcl_parse_struct_addr,
-								   G_STRUCT_OFFSET(struct rspamd_task, from_addr),
-								   0,
-								   NULL);
-	rspamd_rcl_add_default_handler(sub,
-								   "from",
-								   rspamd_rcl_parse_struct_mime_addr,
-								   G_STRUCT_OFFSET(struct rspamd_task, from_envelope),
-								   0,
-								   NULL);
-	rspamd_rcl_add_default_handler(sub,
-								   "rcpt",
-								   rspamd_rcl_parse_struct_mime_addr,
-								   G_STRUCT_OFFSET(struct rspamd_task, rcpt_envelope),
-								   0,
-								   NULL);
-	rspamd_rcl_add_default_handler(sub,
-								   "helo",
-								   rspamd_rcl_parse_struct_string,
-								   G_STRUCT_OFFSET(struct rspamd_task, helo),
-								   0,
-								   NULL);
-	rspamd_rcl_add_default_handler(sub,
-								   "user",
-								   rspamd_rcl_parse_struct_string,
-								   G_STRUCT_OFFSET(struct rspamd_task, auth_user),
-								   0,
-								   NULL);
-	rspamd_rcl_add_default_handler(sub,
-								   "pass_all",
-								   rspamd_protocol_parse_task_flags,
-								   G_STRUCT_OFFSET(struct rspamd_task, flags),
-								   0,
-								   NULL);
-	rspamd_rcl_add_default_handler(sub,
-								   "json",
-								   rspamd_protocol_parse_task_flags,
-								   G_STRUCT_OFFSET(struct rspamd_task, flags),
-								   0,
-								   NULL);
-}
-
-RSPAMD_DESTRUCTOR(rspamd_protocol_control_parser_dtor)
-{
-	rspamd_rcl_sections_free(control_parser);
-}
-
-gboolean
-rspamd_protocol_handle_control(struct rspamd_task *task,
-							   const ucl_object_t *control)
-{
-	GError *err = NULL;
-
-	if (!rspamd_rcl_parse(control_parser, task->cfg, task, task->task_pool,
-						  control, &err)) {
-		msg_warn_protocol("cannot parse control block: %e", err);
-		g_error_free(err);
-
-		return FALSE;
-	}
-
-	return TRUE;
 }
 
 gboolean
@@ -2098,11 +2001,12 @@ void rspamd_protocol_write_log_pipe(struct rspamd_task *task)
 	g_array_free(extra, TRUE);
 }
 
-void rspamd_protocol_write_reply(struct rspamd_task *task, ev_tstamp timeout)
+void rspamd_protocol_write_reply(struct rspamd_task *task, ev_tstamp timeout, struct rspamd_main *srv)
 {
 	struct rspamd_http_message *msg;
 	const char *ctype = "application/json";
 	rspamd_fstring_t *reply;
+	ev_tstamp now = ev_time();
 
 	msg = rspamd_http_new_message(HTTP_RESPONSE);
 
@@ -2163,6 +2067,8 @@ void rspamd_protocol_write_reply(struct rspamd_task *task, ev_tstamp timeout)
 		}
 	}
 	else {
+		rspamd_fstring_t *output;
+		struct rspamd_stat stat_copy;
 		msg->status = rspamd_fstring_new_init("OK", 2);
 
 		switch (task->cmd) {
@@ -2179,6 +2085,15 @@ void rspamd_protocol_write_reply(struct rspamd_task *task, ev_tstamp timeout)
 			rspamd_http_message_set_body(msg, "pong" CRLF, 6);
 			ctype = "text/plain";
 			break;
+		case CMD_METRICS:
+			msg_debug_protocol("writing metrics to client");
+
+			memcpy(&stat_copy, srv->stat, sizeof(stat_copy));
+			output = rspamd_metrics_to_prometheus_string(
+				rspamd_worker_metrics_object(srv->cfg, &stat_copy, now - srv->start_time));
+			rspamd_http_message_set_body_from_fstring_steal(msg, output);
+			ctype = "application/openmetrics-text; version=1.0.0; charset=utf-8";
+			break;
 		default:
 			msg_err_protocol("BROKEN");
 			break;
@@ -2186,7 +2101,7 @@ void rspamd_protocol_write_reply(struct rspamd_task *task, ev_tstamp timeout)
 	}
 
 	ev_now_update(task->event_loop);
-	msg->date = ev_time();
+	msg->date = now;
 
 	rspamd_http_connection_reset(task->http_conn);
 	rspamd_http_connection_write_message(task->http_conn, msg, NULL,

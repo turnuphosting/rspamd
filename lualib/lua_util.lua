@@ -389,8 +389,8 @@ end
 --]]
 
 local unpack_function = table.unpack or unpack
-exports.unpack = function(t)
-  return unpack_function(t)
+exports.unpack = function(...)
+  return unpack_function(...)
 end
 
 --[[[
@@ -755,9 +755,29 @@ local function override_defaults(def, override)
 
   local res = {}
 
-  for k, v in pairs(override) do
-    if type(v) == 'table' then
-      if def[k] and type(def[k]) == 'table' then
+  -- Allow transparent ucl
+  local pairs_func, def_pairs_func = pairs, pairs
+  local type_func, def_type_func = type, type
+  if type(override[0]) == 'userdata' then
+    pairs_func = function(t)
+      return t:pairs()
+    end
+    type_func = function(t)
+      return t:type()
+    end
+  end
+  if type(def[0]) == 'userdata' then
+    def_pairs_func = function(t)
+      return t:pairs()
+    end
+    def_type_func = function(t)
+      return t:type()
+    end
+  end
+
+  for k, v in pairs_func(override) do
+    if type_func(v) == 'table' then
+      if def[k] and def_type_func(def[k]) == 'table' then
         -- Recursively override elements
         res[k] = override_defaults(def[k], v)
       else
@@ -768,7 +788,7 @@ local function override_defaults(def, override)
     end
   end
 
-  for k, v in pairs(def) do
+  for k, v in def_pairs_func(def) do
     if type(res[k]) == 'nil' then
       res[k] = v
     end
@@ -1272,6 +1292,85 @@ exports.maybe_obfuscate_string = function(subject, settings, prefix)
 end
 
 ---[[[
+-- @function lua_util.maybe_encrypt_header(header, settings, prefix)
+-- Encode header with configured public key if enabled in settings.
+-- If header is not set then nil is returned. If pub_key is empty then header is returned.
+-- Supported settings:
+-- * <prefix>_encrypt = false - no need for encryption of a header
+-- * <prefix>_key = 'key' - key that is used encrypt header
+-- * <prefix>_nonce = 'nonce' - nonce to encrypt header(optional)
+-- @return encrypted header
+---]]]
+exports.maybe_encrypt_header = function(header, settings, prefix)
+  local rspamd_secretbox = require "rspamd_cryptobox_secretbox"
+
+  if not header or header == '' then
+    logger.errx(rspamd_config, "Header is empty or nil. Header: %s", header)
+    return nil
+  elseif settings[prefix .. '_encrypt'] then
+    local key = settings[prefix .. '_key']
+    if not key or key == '' then
+      logger.errx(rspamd_config, "Key is empty or nil. Key: %s", key)
+      return header
+    end
+    local cryptobox = rspamd_secretbox.create(key)
+
+    local nonce = settings[prefix .. '_nonce']
+    local encrypted_header = ''
+    if not nonce or nonce == '' then
+      encrypted_header, nonce = cryptobox:encrypt(header)
+    else
+      encrypted_header = cryptobox:encrypt(header, nonce)
+    end
+    encrypted_header = nonce .. encrypted_header
+    return encrypted_header
+  end
+end
+
+---[[[
+-- @function lua_util.maybe_decrypt_header(header, settings, prefix, nonce)
+-- Decode enoced with configured public_key header if enabled in settings.
+-- If encoded header is not set then nil is returned. If pub_key is empty then encoded header is returned.
+-- Supported settings:
+-- * <prefix>_encrypt = false - no need for decryption of a header
+-- * <prefix>_key = 'key' - key that is used decrypt header
+-- * <prefix>_nonce = 'nonce' - nonce used to encrypt header(optional)
+-- Nonce is an optional argument if <prefix>_nonce is provided, otherwise it is an required argument
+-- and <prefix>_nonce is an optional
+-- @return decrypted header
+---]]]
+exports.maybe_decrypt_header = function(encrypted_header, settings, prefix, nonce)
+  local rspamd_secretbox = require "rspamd_cryptobox_secretbox"
+
+  if not encrypted_header or encrypted_header == '' then
+    logger.errx(rspamd_config, "Encrypted header is empty or nil. Encrypted header: %s", encrypted_header)
+    return nil
+  elseif settings[prefix .. '_encrypt'] then
+    local key = settings[prefix .. '_key']
+    if not key or key == '' then
+      logger.errx(rspamd_config, "Key is empty or nil. Key: %s", key)
+      return encrypted_header
+    end
+    local cryptobox = rspamd_secretbox.create(key)
+
+    local result = false
+    local header = ''
+    if not nonce then
+      result, header = cryptobox:decrypt(encrypted_header, settings[prefix .. '_nonce'])
+    else
+      result, header = cryptobox:decrypt(encrypted_header, nonce)
+    end
+
+    if not result then
+      logger.infox(rspamd_config, "Decryption is failed with result: %s and decrypted header: %s", result, header)
+      return nil
+    end
+
+    return header
+  end
+end
+
+---[[[
 -- @function lua_util.callback_from_string(str)
 -- Converts a string like `return function(...) end` to lua function and return true and this function
 -- or returns false + error message
@@ -1666,6 +1765,30 @@ local function join_path(...)
   return table.concat(components, path_sep)
 end
 exports.join_path = join_path
+
+---[[[
+-- @function lua_util.url_encode_string(str)
+-- URL encodes a string
+--
+-- @param {string} str string to encode
+-- @return {string} URL encoded string
+--
+---]]]
+local function url_encode_string(str)
+  if str == nil then
+    return ''
+  end
+  str = string.gsub(str, "([^%w _%%%-%.~])",
+      function(c)
+        return string.format("%%%02X", string.byte(c))
+      end)
+  str = string.gsub(str, " ", "+")
+  return str
+end
+exports.url_encode_string = url_encode_string
+
+assert(url_encode_string('上海+中國') == '%E4%B8%8A%E6%B5%B7%2B%E4%B8%AD%E5%9C%8B')
+assert(url_encode_string('? and the Mysterians') == '%3F+and+the+Mysterians')
 
 -- Short unit test for sanity
 if path_sep == '/' then

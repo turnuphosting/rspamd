@@ -8,7 +8,7 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.12 FATAL_ERROR)
 
 SET(RSPAMD_VERSION_MAJOR 3)
-SET(RSPAMD_VERSION_MINOR 9)
+SET(RSPAMD_VERSION_MINOR 10)
 SET(RSPAMD_VERSION_PATCH 0)
 
 # Keep two digits all the time
@@ -267,6 +267,8 @@ ADD_DEFINITIONS(-DFMT_HEADER_ONLY)
 # Workaround for https://github.com/onqtam/doctest/issues/356
 ADD_DEFINITIONS(-DDOCTEST_CONFIG_USE_STD_HEADERS)
 ADD_DEFINITIONS(-DU_CHARSET_IS_UTF8)
+# Disable zstd deprecation warnings, as they are not relevant for us
+ADD_DEFINITIONS(-DZSTD_DISABLE_DEPRECATE_WARNINGS)
 
 # Check platform specific includes
 CHECK_INCLUDE_FILES(sys/types.h HAVE_SYS_TYPES_H)
@@ -469,6 +471,13 @@ int main(int argc, char **argv) {
         return -1;
 }
 " HAVE_ATOMIC_BUILTINS)
+
+CHECK_C_SOURCE_RUNS("#include <stdio.h>
+int main() {
+  __builtin_cpu_init();
+  printf(\"%d\", __builtin_cpu_supports(\"avx\"));
+  return 0;
+}" HAVE_BUILTIN_CPU_SUPPORTS)
 
 IF (NOT HAVE_ATOMIC_BUILTINS)
     MESSAGE(STATUS "atomic builtins are -NOT- supported")

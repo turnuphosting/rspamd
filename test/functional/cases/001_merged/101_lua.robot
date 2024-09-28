@@ -8,6 +8,7 @@ ${MESSAGE}            ${RSPAMD_TESTDIR}/messages/spam_message.eml
 ${RSPAMD_MAP_MAP}     ${RSPAMD_TESTDIR}/configs/maps/map.list
 ${RSPAMD_RADIX_MAP}   ${RSPAMD_TESTDIR}/configs/maps/ip2.list
 ${RSPAMD_REGEXP_MAP}  ${RSPAMD_TESTDIR}/configs/maps/regexp.list
+${URL_ICS}            ${RSPAMD_TESTDIR}/messages/ics.eml
 
 *** Test Cases ***
 Recipient Parsing Sanity
@@ -48,3 +49,51 @@ Rule conditions
 External Maps Simple
   Scan File  ${MESSAGE}  Settings={symbols_enabled = [EXTERNAL_MAP]}
   Expect Symbol With Exact Options  EXTERNAL_MAP  +hello map
+
+Task Inject Url
+  Scan File  ${URL_ICS}  Settings={symbols_enabled = [TEST_INJECT_URL]}
+  Expect Symbol  TEST_INJECT_URL
+
+Group Score Positive
+  Scan File  ${MESSAGE}  Settings={symbols_enabled = [GR_POSITIVE1, GR_POSITIVE2, GR_POSITIVE4, GR_POSITIVE8, GR_POSITIVE16]}
+  Expect Symbol With Score  GR_POSITIVE1  1
+  Expect Symbol With Score  GR_POSITIVE2  2
+  Expect Symbol With Score  GR_POSITIVE4  4
+  Expect Symbol With Score  GR_POSITIVE8  3
+  Expect Symbol With Score  GR_POSITIVE16  0
+
+Group Score Negative
+  Scan File  ${MESSAGE}  Settings={symbols_enabled = [GR_NEGATIVE1, GR_NEGATIVE2, GR_NEGATIVE4, GR_NEGATIVE8]}
+  Expect Symbol With Score  GR_NEGATIVE1  -1
+  Expect Symbol With Score  GR_NEGATIVE2  -2
+  Expect Symbol With Score  GR_NEGATIVE4  -4
+  Expect Symbol With Score  GR_NEGATIVE8  -3
+
+Group Score Mix 1
+  Scan File  ${MESSAGE}  Settings={symbols_enabled = [GR_POSITIVE1, GR_POSITIVE2, GR_POSITIVE4, GR_POSITIVE8, GR_NEGATIVE1, GR_NEGATIVE2, GR_NEGATIVE4, GR_NEGATIVE8]}
+  Expect Symbol With Score  GR_POSITIVE1  1
+  Expect Symbol With Score  GR_POSITIVE2  2
+  Expect Symbol With Score  GR_POSITIVE4  4
+  Expect Symbol With Score  GR_POSITIVE8  3
+  Expect Symbol With Score  GR_NEGATIVE1  -1
+  Expect Symbol With Score  GR_NEGATIVE2  -2
+  Expect Symbol With Score  GR_NEGATIVE4  -4
+  Expect Symbol With Score  GR_NEGATIVE8  -8
+
+Group Score Mix 2
+  Scan File  ${MESSAGE}  Settings={symbols_enabled = [GR_POSITIVE1, GR_POSITIVE2, GR_POSITIVE4, GR_POSITIVE8, GR_NEGATIVE16]}
+  Expect Symbol With Score  GR_POSITIVE1  1
+  Expect Symbol With Score  GR_POSITIVE2  2
+  Expect Symbol With Score  GR_POSITIVE4  4
+  Expect Symbol With Score  GR_POSITIVE8  3
+  Expect Symbol With Score  GR_NEGATIVE16  -16
+
+Group Score Mix 3
+  Scan File  ${MESSAGE}  Settings={symbols_enabled = [GR_POSITIVE1, GR_NEGATIVE16]}
+  Expect Symbol With Score  GR_POSITIVE1  1
+  Expect Symbol With Score  GR_NEGATIVE16  -11
+
+Group Score Mix 4
+  Scan File  ${MESSAGE}  Settings={symbols_enabled = [GR_POSITIVE16, GR_NEGATIVE16]}
+  Expect Symbol With Score  GR_POSITIVE16  10
+  Expect Symbol With Score  GR_NEGATIVE16  -16

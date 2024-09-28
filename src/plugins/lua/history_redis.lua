@@ -21,8 +21,8 @@ if confighelp then
 redis_history {
   # History key name
   key_prefix = 'rs_history{{HOSTNAME}}{{COMPRESS}}';
-  # History expire in seconds
-  expire = 0;
+  # Expire in seconds for inactive keys, default to 5 days
+  expire = 432000;
   # History rows limit
   nrows = 200;
   # Use zstd compression when storing data in redis
@@ -281,7 +281,7 @@ if opts then
   local res, err = settings_schema:transform(settings)
 
   if not res then
-    rspamd_logger.warnx(rspamd_config, '%s: plugin is misconfigured: %s', N, err)
+    rspamd_logger.warnx(rspamd_config, 'plugin %s is misconfigured: %s', N, err)
     lua_util.disable_module(N, "config")
     return
   end
